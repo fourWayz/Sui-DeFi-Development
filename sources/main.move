@@ -1,222 +1,187 @@
-/*
-Disclaimer: Use of Unaudited Code for Educational Purposes Only
-This code is provided strictly for educational purposes and has not undergone any formal security audit. 
-It may contain errors, vulnerabilities, or other issues that could pose risks to the integrity of your system or data.
+#[lint_allow(self_transfer)] // Allowing self transfer lint
+#[allow(unused_use)] // Allowing unused imports
 
-By using this code, you acknowledge and agree that:
-    - No Warranty: The code is provided "as is" without any warranty of any kind, either express or implied. The entire risk as to the quality and performance of the code is with you.
-    - Educational Use Only: This code is intended solely for educational and learning purposes. It is not intended for use in any mission-critical or production systems.
-    - No Liability: In no event shall the authors or copyright holders be liable for any claim, damages, or other liability, whether in an action of contract, tort, or otherwise, arising from, out of, or in connection with the use or performance of this code.
-    - Security Risks: The code may not have been tested for security vulnerabilities. It is your responsibility to conduct a thorough security review before using this code in any sensitive or production environment.
-    - No Support: The authors of this code may not provide any support, assistance, or updates. You are using the code at your own risk and discretion.
-
-Before using this code, it is recommended to consult with a qualified professional and perform a comprehensive security assessment. By proceeding to use this code, you agree to assume all associated risks and responsibilities.
-*/
-
-#[lint_allow(self_transfer)]
 module dacade_deepbook::book {
-    use deepbook::clob_v2 as deepbook;
-    use deepbook::custodian_v2 as custodian;
+    // Import necessary modules
+    use sui::tx_context::{Self, TxContext}; // Importing TxContext module
+    use sui::object::{Self, ID, UID}; // Importing object module with specific items
+    use sui::coin::{Self, Coin}; // Importing Coin module
+    use sui::table::{Table, Self}; // Importing Table module
+    use sui::transfer; // Importing transfer module
     use sui::sui::SUI;
-    use sui::tx_context::{TxContext, Self};
-    use sui::coin::{Coin, Self};
-    use sui::balance::{Self};
-    use sui::transfer::Self;
-    use sui::clock::Clock;
+    use sui::clock::{Self, Clock}; // Importing Clock module
+    use std::string::{Self, String}; // Importing String module
+    use std::vector; // Importing vector module
+    use std::option::{Option, none, some}; // Importing Option module with specific items
+    use sui::balance::{Self, Balance};
 
-    const FLOAT_SCALING: u64 = 1_000_000_000;
+    // Error codes
+    const INSUFFICIENT_BALANCE: u64 = 1; // Error code for insufficient balance
+    const INVALID_INDEX: u64 = 2; // Error code for invalid index
 
-
-    public fun new_pool<Base, Quote>(payment: &mut Coin<SUI>, ctx: &mut TxContext) {
-        let balance = coin::balance_mut(payment);
-        let fee = balance::split(balance, 100 * 1_000_000_000);
-        let coin = coin::from_balance(fee, ctx);
-
-        deepbook::create_pool<Base, Quote>(
-            1 * FLOAT_SCALING,
-            1,
-            coin,
-            ctx
-        );
+    // Transaction struct
+    struct Transaction has store, copy, drop { // Defining the Transaction struct
+        transaction_type: String, // Type of transaction
+        amount: u64, // Amount involved in the transaction
+        to: Option<address>, // Receiver address if applicable
+        from: Option<address>, // Sender address if applicable
     }
 
-    public fun new_custodian_account(ctx: &mut TxContext) {
-        transfer::public_transfer(deepbook::create_account(ctx), tx_context::sender(ctx))
+    // Asset struct
+    struct TokenizedGamingAsset has key, store { // Defining the TokenizedGamingAsset struct
+        id: UID, // Asset ID
+        create_date: u64, // Creation date of the asset
+        updated_date: u64, // Last updated date of the asset
+        total_supply: Balance<SUI>, // Total supply of the asset
+        owner: address, // Owner of the asset
+        transactions: vector<Transaction>, // List of transactions associated with the asset
     }
 
-    public fun make_base_deposit<Base, Quote>(pool: &mut deepbook::Pool<Base, Quote>, coin: Coin<Base>, account_cap: &custodian::AccountCap) {
-        deepbook::deposit_base(pool, coin, account_cap)
+    // Create a new tokenized gaming asset
+    public fun create_asset(ctx: &mut TxContext, clock: &Clock) { // Function to create a new tokenized gaming asset
+        let id = object::new(ctx); // Generate a new object ID
+        let total_supply = balance::zero(); // Initialize total supply to zero
+        let owner = tx_context::sender(ctx); // Set the owner as the sender
+        let create_date = clock::timestamp_ms(clock); // Get the current timestamp as creation date
+        let updated_date = create_date; // Set the updated date to creation date initially
+        let transactions = vector::empty<Transaction>(); // Initialize transactions vector
+        transfer::share_object(TokenizedGamingAsset { // Share the tokenized gaming asset object
+            id,
+            create_date,
+            updated_date,
+            total_supply,
+            owner,
+            transactions,
+        });
     }
 
-    public fun make_quote_deposit<Base, Quote>(pool: &mut deepbook::Pool<Base, Quote>, coin: Coin<Quote>, account_cap: &custodian::AccountCap) {
-        deepbook::deposit_quote(pool, coin, account_cap)
-    }
-
-    public fun withdraw_base<BaseAsset, QuoteAsset>(
-        pool: &mut deepbook::Pool<BaseAsset, QuoteAsset>,
-        quantity: u64,
-        account_cap: &custodian::AccountCap,
-        ctx: &mut TxContext
-    ) {
-        let base = deepbook::withdraw_base(pool, quantity, account_cap, ctx);
-        transfer::public_transfer(base, tx_context::sender(ctx));
-    }
-
-    public fun withdraw_quote<BaseAsset, QuoteAsset>(
-        pool: &mut deepbook::Pool<BaseAsset, QuoteAsset>,
-        quantity: u64,
-        account_cap: &custodian::AccountCap,
-        ctx: &mut TxContext
-    ) {
-        let quote = deepbook::withdraw_quote(pool, quantity, account_cap, ctx);
-        transfer::public_transfer(quote, tx_context::sender(ctx));
-    }
-
-    public fun place_limit_order<Base, Quote>(
-        pool: &mut deepbook::Pool<Base, Quote>,
-        client_order_id: u64,
-        price: u64, 
-        quantity: u64, 
-        self_matching_prevention: u8,
-        is_bid: bool,
-        expire_timestamp: u64,
-        restriction: u8,
-        clock: &Clock,
-        account_cap: &custodian::AccountCap,
-        ctx: &mut TxContext
-    ): (u64, u64, bool, u64) {
-        deepbook::place_limit_order(
-            pool, 
-            client_order_id, 
-            price, 
-            quantity, 
-            self_matching_prevention, 
-            is_bid, 
-            expire_timestamp, 
-            restriction, 
-            clock, 
-            account_cap, 
-            ctx
-        )
-    }
-
-    public fun place_base_market_order<Base, Quote>(
-        pool: &mut deepbook::Pool<Base, Quote>,
-        account_cap: &custodian::AccountCap,
-        base_coin: Coin<Base>,
-        client_order_id: u64,
-        is_bid: bool,
-        clock: &Clock,
+    // Mint new tokens for the asset
+    public fun mint_tokens(
+        asset: &mut TokenizedGamingAsset,
+        amount: Coin<SUI>,
         ctx: &mut TxContext,
+        clock: &Clock
     ) {
-        let quote_coin = coin::zero<Quote>(ctx);
-        let quantity = coin::value(&base_coin);
-        place_market_order(
-            pool,
-            account_cap,
-            client_order_id,
-            quantity,
-            is_bid,
-            base_coin,
-            quote_coin,
-            clock,
-            ctx
-        )
+        asset.total_supply = balance::join(asset.total_supply, amount); // Increase total supply
+        let transaction = Transaction { // Create a mint transaction
+            transaction_type: string::utf8(b"mint"),
+            amount: coin::value(&amount),
+            to: some(asset.owner), // Tokens are minted to the asset owner
+            from: none(),
+        };
+        vector::push_back(&mut asset.transactions, transaction); // Record the mint transaction
+        asset.updated_date = clock::timestamp_ms(clock); // Update the asset's updated date
     }
 
-    public fun place_quote_market_order<Base, Quote>(
-        pool: &mut deepbook::Pool<Base, Quote>,
-        account_cap: &custodian::AccountCap,
-        quote_coin: Coin<Quote>,
-        client_order_id: u64,
-        is_bid: bool,
-        clock: &Clock,
+    // Burn tokens from the asset
+    public fun burn_tokens(
+        asset: &mut TokenizedGamingAsset,
+        amount: u64,
         ctx: &mut TxContext,
+        clock: &Clock
     ) {
-        let base_coin = coin::zero<Base>(ctx);
-        let quantity = coin::value(&quote_coin);
-        place_market_order(
-            pool,
-            account_cap,
-            client_order_id,
-            quantity,
-            is_bid,
-            base_coin,
-            quote_coin,
-            clock,
-            ctx
-        )
+        assert!(
+            coin::value(&asset.total_supply) >= amount,
+            INSUFFICIENT_BALANCE
+        ); // Assert if there are enough tokens to burn
+        asset.total_supply = coin::split(&mut asset.total_supply, amount, ctx); // Decrease total supply
+        let transaction = Transaction { // Create a burn transaction
+            transaction_type: string::utf8(b"burn"),
+            amount: amount,
+            to: none(),
+            from: some(asset.owner), // Tokens are burned from the asset owner
+        };
+        vector::push_back(&mut asset.transactions, transaction); // Record the burn transaction
+        asset.updated_date = clock::timestamp_ms(clock); // Update the asset's updated date
     }
 
-    fun place_market_order<Base, Quote>(
-        pool: &mut deepbook::Pool<Base, Quote>,
-        account_cap: &custodian::AccountCap,
-        client_order_id: u64,
-        quantity: u64,
-        is_bid: bool,
-        base_coin: Coin<Base>,
-        quote_coin: Coin<Quote>,
-        clock: &Clock, // @0x6 hardcoded id of the Clock object
+    // Transfer tokens between accounts
+    public fun transfer_tokens(
+        asset: &mut TokenizedGamingAsset,
+        recipient: address,
+        amount: u64,
         ctx: &mut TxContext,
+        clock: &Clock
     ) {
-        let (base, quote) = deepbook::place_market_order(
-            pool, 
-            account_cap, 
-            client_order_id, 
-            quantity, 
-            is_bid, 
-            base_coin, 
-            quote_coin, 
-            clock, 
-            ctx
-        );
-        transfer::public_transfer(base, tx_context::sender(ctx));
-        transfer::public_transfer(quote, tx_context::sender(ctx));
+        assert!(
+            coin::value(&asset.total_supply) >= amount,
+            INSUFFICIENT_BALANCE
+        ); // Assert if there are enough tokens to transfer
+        let transaction = Transaction { // Create a transfer transaction
+            transaction_type: string::utf8(b"transfer"),
+            amount: amount,
+            to: some(recipient),
+            from: some(asset.owner), // Tokens are transferred from the asset owner
+        };
+        vector::push_back(&mut asset.transactions, transaction); // Record the transfer transaction
+        asset.updated_date = clock::timestamp_ms(clock); // Update the asset's updated date
+        transfer::public_transfer(coin::new(ctx, amount), recipient); // Transfer tokens to the recipient
     }
 
-    public fun swap_exact_base_for_quote<Base, Quote>(
-        pool: &mut deepbook::Pool<Base, Quote>,
-        client_order_id: u64,
-        account_cap: &custodian::AccountCap,
-        quantity: u64,
-        base_coin: Coin<Base>,
-        clock: &Clock,
-        ctx: &mut TxContext
-    ) {
-        let quote_coin = coin::zero<Quote>(ctx);
-        let (base, quote, _) = deepbook::swap_exact_base_for_quote(
-            pool,
-            client_order_id,
-            account_cap,
-            quantity,
-            base_coin,
-            quote_coin,
-            clock,
-            ctx
-        );
-        transfer::public_transfer(base, tx_context::sender(ctx));
-        transfer::public_transfer(quote, tx_context::sender(ctx));
+    // Get the total supply of the asset
+    public fun get_total_supply(asset: &TokenizedGamingAsset) : u64 {
+        coin::value(&asset.total_supply) // Return the total supply
     }
 
-    public fun swap_exact_quote_for_base<Base, Quote>(
-        pool: &mut deepbook::Pool<Base, Quote>,
-        account_cap: &custodian::AccountCap,
-        quote_coin: Coin<Quote>,
-        client_order_id: u64,
-        quantity: u64,
+    // Get the owner of the asset
+    public fun get_owner(asset: &TokenizedGamingAsset) :address {
+        asset.owner // Return the owner
+    }
+
+    // Get the creation date of the asset
+    public fun get_create_date(asset: &TokenizedGamingAsset): u64 {
+        asset.create_date // Return the creation date
+    }
+
+    // Get the last updated date of the asset
+    public fun get_updated_date(asset: &TokenizedGamingAsset) : u64 {
+        asset.updated_date // Return the last updated date
+    }
+
+    // Get the number of transactions associated with the asset
+    public fun get_transactions_count(asset: &TokenizedGamingAsset): u64 {
+        vector::length(&asset.transactions) // Return the number of transactions
+    }
+
+    // View a specific transaction of the asset
+    public fun view_transaction(
+        asset: &TokenizedGamingAsset,
+        index: u64
+    ) : (String, u64, Option<address>, Option<address>) {
+        assert!(
+            index < vector::length(&asset.transactions),
+            INVALID_INDEX
+        ); // Assert if the index is within bounds
+        let transaction = vector::borrow(&asset.transactions, index); // Get the transaction at the specified index
+        (
+            transaction.transaction_type,
+            transaction.amount,
+            transaction.to,
+            transaction.from,
+        ) // Return transaction details
+    }
+
+        // Update the owner of the asset
+    public fun update_owner(
+        asset: &mut TokenizedGamingAsset,
+        new_owner: address,
         clock: &Clock,
+    ) {
+        asset.owner = new_owner; // Update the owner
+        asset.updated_date = clock::timestamp_ms(clock); // Update the asset's updated date
+    }
+
+    // Get the balance of the asset owner
+    public fun get_owner_balance(asset: &TokenizedGamingAsset) : u64 {
+        coin::value(&asset.total_supply) // Return the total supply as owner balance
+    }
+
+    // View all transactions of the asset
+    public fun view_all_transactions(
+        asset: &TokenizedGamingAsset,
         ctx: &mut TxContext,
-    ) {
-        let (base, quote, _) = deepbook::swap_exact_quote_for_base(
-            pool,
-            client_order_id,
-            account_cap,
-            quantity,
-            clock,
-            quote_coin,
-            ctx
-        );
-        transfer::public_transfer(base, tx_context::sender(ctx));
-        transfer::public_transfer(quote, tx_context::sender(ctx));
+    ) : vector<(String, u64, Option<address>, Option<address>)> {
+        asset.transactions // Return all transactions
     }
+
 }
