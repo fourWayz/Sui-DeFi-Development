@@ -1,121 +1,104 @@
 #[lint_allow(self_transfer)] // Allowing self transfer lint
-#[allow(unused_use)] // Allowing unused imports
+#[allow(unused_imports)] // Allowing unused imports
 
 module dacade_deepbook::book {
-    // Import necessary modules
-    use sui::tx_context::{Self, TxContext}; // Importing TxContext module
-    use sui::object::{Self, ID, UID}; // Importing object module with specific items
-    use sui::coin::{Self, Coin}; // Importing Coin module
-    use sui::table::{Table, Self}; // Importing Table module
-    use sui::transfer; // Importing transfer module
+    // Simplified and corrected imports
+    use sui::tx_context::TxContext; 
+    use sui::object::{ID, UID}; 
+    use sui::coin::Coin;
+    use sui::table::Table;
+    use sui::transfer;
     use sui::sui::SUI;
-    use sui::clock::{Self, Clock}; // Importing Clock module
-    use std::string::{Self, String}; // Importing String module
-    use std::vector; // Importing vector module
-    use std::option::{Option, none, some}; // Importing Option module with specific items
-    use sui::balance::{Self, Balance};
+    use sui::clock::Clock;
+    use std::string::String;
+    use std::vector;
+    use std::option::{Option, none, some};
 
     // Error codes
-    const INSUFFICIENT_BALANCE: u64 = 1; // Error code for insufficient balance
-    const INVALID_INDEX: u64 = 2; // Error code for invalid index
+    const INSUFFICIENT_BALANCE: u64 = 1;
+    const INVALID_INDEX: u64 = 2;
 
-    // Transaction struct
-    struct Transaction has store, copy, drop { // Defining the Transaction struct
-        transaction_type: String, // Type of transaction
-        amount: u64, // Amount involved in the transaction
-        to: Option<address>, // Receiver address if applicable
-        from: Option<address>, // Sender address if applicable
+    struct Transaction has store, copy, drop {
+        transaction_type: String,
+        amount: u64,
+        to: Option<address>,
+        from: Option<address>,
     }
 
-    // Asset struct
-    struct TokenizedGamingAsset has key, store { // Defining the TokenizedGamingAsset struct
-        id: UID, // Asset ID
-        create_date: u64, // Creation date of the asset
-        updated_date: u64, // Last updated date of the asset
-        total_supply: Balance<SUI>, // Total supply of the asset
-        owner: address, // Owner of the asset
-        transactions: vector<Transaction>, // List of transactions associated with the asset
+    struct TokenizedGamingAsset has key, store {
+        id: UID,
+        create_date: u64,
+        updated_date: u64,
+        total_supply: Coin<SUI>,
+        owner: address,
+        transactions: vector<Transaction>,
+        trading_enabled: bool, // New field to control trading
     }
 
-    // Create a new tokenized gaming asset
-    public fun create_asset(ctx: &mut TxContext, clock: &Clock) { // Function to create a new tokenized gaming asset
-        let id = object::new(ctx); // Generate a new object ID
-        let total_supply = balance::zero(); // Initialize total supply to zero
-        let owner = tx_context::sender(ctx); // Set the owner as the sender
-        let create_date = clock::timestamp_ms(clock); // Get the current timestamp as creation date
-        let updated_date = create_date; // Set the updated date to creation date initially
-        let transactions = vector::empty<Transaction>(); // Initialize transactions vector
-        transfer::share_object(TokenizedGamingAsset { // Share the tokenized gaming asset object
+    public fun create_asset(ctx: &mut TxContext, clock: &Clock) {
+        let id = UID::new(ctx);
+        let total_supply = Coin::<SUI>::zero();
+        let owner = TxContext::sender(ctx);
+        let create_date = Clock::now_ms(clock);
+        let transactions = vector::empty<Transaction>();
+        let asset = TokenizedGamingAsset {
             id,
             create_date,
-            updated_date,
+            updated_date: create_date,
             total_supply,
             owner,
             transactions,
-        });
+            trading_enabled: true, // Initialize trading as enabled
+        };
+        transfer::share_object(ctx, asset);
     }
 
-    // Mint new tokens for the asset
-    public fun mint_tokens(
-        asset: &mut TokenizedGamingAsset,
-        amount: Coin<SUI>,
-        ctx: &mut TxContext,
-        clock: &Clock
-    ) {
-        asset.total_supply = balance::join(asset.total_supply, amount); // Increase total supply
-        let transaction = Transaction { // Create a mint transaction
-            transaction_type: string::utf8(b"mint"),
-            amount: coin::value(&amount),
-            to: some(asset.owner), // Tokens are minted to the asset owner
+    public fun mint_tokens(asset: &mut TokenizedGamingAsset, amount: u64, ctx: &mut TxContext) {
+        assert!(asset.trading_enabled, "Trading is disabled.");
+        asset.total_supply = Coin::mint(asset.total_supply, amount, ctx);
+        let transaction = Transaction {
+            transaction_type: "mint".to_string(),
+            amount,
+            to: some(asset.owner),
             from: none(),
         };
-        vector::push_back(&mut asset.transactions, transaction); // Record the mint transaction
-        asset.updated_date = clock::timestamp_ms(clock); // Update the asset's updated date
+        vector::push_back(&mut asset.transactions, transaction);
+        asset.updated_date = Clock::now_ms(ctx);
     }
 
-    // Burn tokens from the asset
-    public fun burn_tokens(
-        asset: &mut TokenizedGamingAsset,
-        amount: u64,
-        ctx: &mut TxContext,
-        clock: &Clock
-    ) {
-        assert!(
-            coin::value(&asset.total_supply) >= amount,
-            INSUFFICIENT_BALANCE
-        ); // Assert if there are enough tokens to burn
-        asset.total_supply = coin::split(&mut asset.total_supply, amount, ctx); // Decrease total supply
-        let transaction = Transaction { // Create a burn transaction
-            transaction_type: string::utf8(b"burn"),
-            amount: amount,
+    public fun burn_tokens(asset: &mut TokenizedGamingAsset, amount: u64, ctx: &mut TxContext) {
+        assert!(asset.trading_enabled, "Trading is disabled.");
+        asset.total_supply = Coin::burn(asset.total_supply, amount, ctx);
+        let transaction = Transaction {
+            transaction_type: "burn".to_string(),
+            amount,
             to: none(),
-            from: some(asset.owner), // Tokens are burned from the asset owner
+            from: some(asset.owner),
         };
-        vector::push_back(&mut asset.transactions, transaction); // Record the burn transaction
-        asset.updated_date = clock::timestamp_ms(clock); // Update the asset's updated date
+        vector::push_back(&mut asset.transactions, transaction);
+        asset.updated_date = Clock::now_ms(ctx);
     }
 
-    // Transfer tokens between accounts
-    public fun transfer_tokens(
-        asset: &mut TokenizedGamingAsset,
-        recipient: address,
-        amount: u64,
-        ctx: &mut TxContext,
-        clock: &Clock
-    ) {
-        assert!(
-            coin::value(&asset.total_supply) >= amount,
-            INSUFFICIENT_BALANCE
-        ); // Assert if there are enough tokens to transfer
-        let transaction = Transaction { // Create a transfer transaction
-            transaction_type: string::utf8(b"transfer"),
-            amount: amount,
+    public fun transfer_tokens(asset: &mut TokenizedGamingAsset, recipient: address, amount: u64, ctx: &mut TxContext) {
+        assert!(asset.trading_enabled, "Trading is disabled.");
+        Coin::transfer(asset.total_supply, recipient, amount, ctx);
+        let transaction = Transaction {
+            transaction_type: "transfer".to_string(),
+            amount,
             to: some(recipient),
-            from: some(asset.owner), // Tokens are transferred from the asset owner
+            from: some(asset.owner),
         };
-        vector::push_back(&mut asset.transactions, transaction); // Record the transfer transaction
-        asset.updated_date = clock::timestamp_ms(clock); // Update the asset's updated date
-        transfer::public_transfer(coin::new(ctx, amount), recipient); // Transfer tokens to the recipient
+        vector::push_back(&mut asset.transactions, transaction);
+        asset.updated_date = Clock::now_ms(ctx);
+    }
+
+    public fun toggle_trading(asset: &mut TokenizedGamingAsset) {
+        asset.trading_enabled = !asset.trading_enabled; // Toggle trading state
+        asset.updated_date = Clock::now_ms(ctx);
+    }
+
+    public fun is_trading_enabled(asset: &TokenizedGamingAsset): bool {
+        asset.trading_enabled
     }
 
     // Get the total supply of the asset
