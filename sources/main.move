@@ -18,6 +18,7 @@ module dacade_deepbook::book {
     // Error codes
     const INSUFFICIENT_BALANCE: u64 = 1; // Error code for insufficient balance
     const INVALID_INDEX: u64 = 2; // Error code for invalid index
+    const ENOT_OWNER: u64 = 3; // New error code for not being the owner
 
     // Transaction struct
     struct Transaction has store, copy, drop { // Defining the Transaction struct
@@ -25,6 +26,8 @@ module dacade_deepbook::book {
         amount: u64, // Amount involved in the transaction
         to: Option<address>, // Receiver address if applicable
         from: Option<address>, // Sender address if applicable
+        timestamp: u64, // Timestamp of the transaction
+        description: String, // Description of the transaction
     }
 
     // Asset struct
@@ -37,6 +40,32 @@ module dacade_deepbook::book {
         transactions: vector<Transaction>, // List of transactions associated with the asset
     }
 
+    // Helper function to handle balance updates and record transactions
+    fun handle_balance_update(
+        asset: &mut TokenizedGamingAsset,
+        amount: u64,
+        transaction_type: vector<u8>,
+        clock: &Clock,
+        ctx: &mut TxContext
+    ) {
+        let transaction_description = string::utf8(b""); // Add a description if needed
+        if transaction_type == b"mint" {
+            asset.total_supply = balance::join(asset.total_supply, coin::take(&mut coin::new(ctx, amount), ctx));
+        } else if transaction_type == b"burn" {
+            asset.total_supply = coin::split(&mut asset.total_supply, amount, ctx);
+        };
+        let transaction = Transaction {
+            transaction_type: string::utf8(transaction_type),
+            amount: amount,
+            to: if transaction_type == b"mint" { some(asset.owner) } else { none() },
+            from: if transaction_type == b"burn" { some(asset.owner) } else { none() },
+            timestamp: clock::timestamp_ms(clock),
+            description: transaction_description,
+        };
+        vector::push_back(&mut asset.transactions, transaction);
+        asset.updated_date = clock::timestamp_ms(clock);
+    }
+
     // Create a new tokenized gaming asset
     public fun create_asset(ctx: &mut TxContext, clock: &Clock) { // Function to create a new tokenized gaming asset
         let id = object::new(ctx); // Generate a new object ID
@@ -45,7 +74,7 @@ module dacade_deepbook::book {
         let create_date = clock::timestamp_ms(clock); // Get the current timestamp as creation date
         let updated_date = create_date; // Set the updated date to creation date initially
         let transactions = vector::empty<Transaction>(); // Initialize transactions vector
-        transfer::share_object(TokenizedGamingAsset { // Share the tokenized gaming asset object
+        transfer::share_object(TokenizedGamingAsset {
             id,
             create_date,
             updated_date,
@@ -58,19 +87,11 @@ module dacade_deepbook::book {
     // Mint new tokens for the asset
     public fun mint_tokens(
         asset: &mut TokenizedGamingAsset,
-        amount: Coin<SUI>,
+        amount: u64,
         ctx: &mut TxContext,
         clock: &Clock
     ) {
-        asset.total_supply = balance::join(asset.total_supply, amount); // Increase total supply
-        let transaction = Transaction { // Create a mint transaction
-            transaction_type: string::utf8(b"mint"),
-            amount: coin::value(&amount),
-            to: some(asset.owner), // Tokens are minted to the asset owner
-            from: none(),
-        };
-        vector::push_back(&mut asset.transactions, transaction); // Record the mint transaction
-        asset.updated_date = clock::timestamp_ms(clock); // Update the asset's updated date
+        handle_balance_update(asset, amount, b"mint", clock, ctx);
     }
 
     // Burn tokens from the asset
@@ -80,19 +101,8 @@ module dacade_deepbook::book {
         ctx: &mut TxContext,
         clock: &Clock
     ) {
-        assert!(
-            coin::value(&asset.total_supply) >= amount,
-            INSUFFICIENT_BALANCE
-        ); // Assert if there are enough tokens to burn
-        asset.total_supply = coin::split(&mut asset.total_supply, amount, ctx); // Decrease total supply
-        let transaction = Transaction { // Create a burn transaction
-            transaction_type: string::utf8(b"burn"),
-            amount: amount,
-            to: none(),
-            from: some(asset.owner), // Tokens are burned from the asset owner
-        };
-        vector::push_back(&mut asset.transactions, transaction); // Record the burn transaction
-        asset.updated_date = clock::timestamp_ms(clock); // Update the asset's updated date
+        assert!(coin::value(&asset.total_supply) >= amount, INSUFFICIENT_BALANCE);
+        handle_balance_update(asset, amount, b"burn", clock, ctx);
     }
 
     // Transfer tokens between accounts
@@ -103,28 +113,28 @@ module dacade_deepbook::book {
         ctx: &mut TxContext,
         clock: &Clock
     ) {
-        assert!(
-            coin::value(&asset.total_supply) >= amount,
-            INSUFFICIENT_BALANCE
-        ); // Assert if there are enough tokens to transfer
-        let transaction = Transaction { // Create a transfer transaction
+        assert!(tx_context::sender(ctx) == asset.owner, ENOT_OWNER); // Additional check
+        assert!(coin::value(&asset.total_supply) >= amount, INSUFFICIENT_BALANCE);
+        transfer::public_transfer(coin::take(&mut asset.total_supply, amount, ctx), recipient);
+        let transaction = Transaction {
             transaction_type: string::utf8(b"transfer"),
             amount: amount,
             to: some(recipient),
-            from: some(asset.owner), // Tokens are transferred from the asset owner
+            from: some(asset.owner),
+            timestamp: clock::timestamp_ms(clock),
+            description: string::utf8(b"Token transfer"),
         };
-        vector::push_back(&mut asset.transactions, transaction); // Record the transfer transaction
-        asset.updated_date = clock::timestamp_ms(clock); // Update the asset's updated date
-        transfer::public_transfer(coin::new(ctx, amount), recipient); // Transfer tokens to the recipient
+        vector::push_back(&mut asset.transactions, transaction);
+        asset.updated_date = clock::timestamp_ms(clock);
     }
 
     // Get the total supply of the asset
-    public fun get_total_supply(asset: &TokenizedGamingAsset) : u64 {
+    public fun get_total_supply(asset: &TokenizedGamingAsset): u64 {
         coin::value(&asset.total_supply) // Return the total supply
     }
 
     // Get the owner of the asset
-    public fun get_owner(asset: &TokenizedGamingAsset) :address {
+    public fun get_owner(asset: &TokenizedGamingAsset): address {
         asset.owner // Return the owner
     }
 
@@ -134,7 +144,7 @@ module dacade_deepbook::book {
     }
 
     // Get the last updated date of the asset
-    public fun get_updated_date(asset: &TokenizedGamingAsset) : u64 {
+    public fun get_updated_date(asset: &TokenizedGamingAsset): u64 {
         asset.updated_date // Return the last updated date
     }
 
@@ -147,41 +157,40 @@ module dacade_deepbook::book {
     public fun view_transaction(
         asset: &TokenizedGamingAsset,
         index: u64
-    ) : (String, u64, Option<address>, Option<address>) {
-        assert!(
-            index < vector::length(&asset.transactions),
-            INVALID_INDEX
-        ); // Assert if the index is within bounds
-        let transaction = vector::borrow(&asset.transactions, index); // Get the transaction at the specified index
+    ): (String, u64, Option<address>, Option<address>, u64, String) {
+        assert!(index < vector::length(&asset.transactions), INVALID_INDEX);
+        let transaction = vector::borrow(&asset.transactions, index);
         (
             transaction.transaction_type,
             transaction.amount,
             transaction.to,
             transaction.from,
-        ) // Return transaction details
+            transaction.timestamp,
+            transaction.description,
+        )
     }
 
-        // Update the owner of the asset
+    // Update the owner of the asset
     public fun update_owner(
         asset: &mut TokenizedGamingAsset,
         new_owner: address,
         clock: &Clock,
+        ctx: &mut TxContext
     ) {
-        asset.owner = new_owner; // Update the owner
-        asset.updated_date = clock::timestamp_ms(clock); // Update the asset's updated date
+        assert!(tx_context::sender(ctx) == asset.owner, ENOT_OWNER); // Additional check
+        asset.owner = new_owner;
+        asset.updated_date = clock::timestamp_ms(clock);
     }
 
-    // Get the balance of the asset owner
-    public fun get_owner_balance(asset: &TokenizedGamingAsset) : u64 {
-        coin::value(&asset.total_supply) // Return the total supply as owner balance
+    // Get the balance of the asset
+public fun get_asset_balance(asset: &TokenizedGamingAsset): u64 {
+        coin::value(&asset.total_supply) // Return the total supply as asset balance
     }
 
     // View all transactions of the asset
     public fun view_all_transactions(
         asset: &TokenizedGamingAsset,
-        ctx: &mut TxContext,
-    ) : vector<(String, u64, Option<address>, Option<address>)> {
-        asset.transactions // Return all transactions
+    ): &vector<Transaction> {
+        &asset.transactions // Return a reference to the transactions vector
     }
-
 }
