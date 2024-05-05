@@ -1,7 +1,4 @@
-#[lint_allow(self_transfer)] // Allowing self transfer lint
-#[allow(unused_use)] // Allowing unused imports
-
-module dacade_deepbook::book {
+module Token::main {
     // Import necessary modules
     use sui::tx_context::{Self, TxContext}; // Importing TxContext module
     use sui::object::{Self, ID, UID}; // Importing object module with specific items
