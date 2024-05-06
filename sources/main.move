@@ -1,187 +1,327 @@
-#[lint_allow(self_transfer)] // Allowing self transfer lint
-#[allow(unused_use)] // Allowing unused imports
+/// EMBD Incentive Token is responsible for the issuance of EMBD tokens for the Embedr Protocol
+module Token::main {
+    use std::option;
 
-module dacade_deepbook::book {
-    // Import necessary modules
-    use sui::tx_context::{Self, TxContext}; // Importing TxContext module
-    use sui::object::{Self, ID, UID}; // Importing object module with specific items
-    use sui::coin::{Self, Coin}; // Importing Coin module
-    use sui::table::{Table, Self}; // Importing Table module
-    use sui::transfer; // Importing transfer module
-    use sui::sui::SUI;
-    use sui::clock::{Self, Clock}; // Importing Clock module
-    use std::string::{Self, String}; // Importing String module
-    use std::vector; // Importing vector module
-    use std::option::{Option, none, some}; // Importing Option module with specific items
-    use sui::balance::{Self, Balance};
+    use sui::object::{Self, UID, ID};
+    use sui::tx_context::{TxContext};
+    use sui::balance::{Self, Supply};
+    use sui::transfer;
+    use sui::coin::{Self, Coin};
+    use sui::package::{Publisher};
+    use sui::tx_context;
+    use sui::vec_set::{Self, VecSet};
+    use sui::table::{Self, Table};
 
-    // Error codes
-    const INSUFFICIENT_BALANCE: u64 = 1; // Error code for insufficient balance
-    const INVALID_INDEX: u64 = 2; // Error code for invalid index
+    // =================== Errors ===================
 
-    // Transaction struct
-    struct Transaction has store, copy, drop { // Defining the Transaction struct
-        transaction_type: String, // Type of transaction
-        amount: u64, // Amount involved in the transaction
-        to: Option<address>, // Receiver address if applicable
-        from: Option<address>, // Sender address if applicable
+    const ERROR_UNAUTHORIZED: u64 = 1;
+
+    // =================== Storage ===================
+
+    /// OTW to create the token
+    struct MAIN has drop {}
+
+    /// Shared object
+    struct Storage has key {
+        id: UID,
+        supply: Supply<MAIN>,
+        balances: Table<address, u64>,
+        managers: VecSet<ID> // List of minters for this token
     }
 
-    // Asset struct
-    struct TokenizedGamingAsset has key, store { // Defining the TokenizedGamingAsset struct
-        id: UID, // Asset ID
-        create_date: u64, // Creation date of the asset
-        updated_date: u64, // Last updated date of the asset
-        total_supply: Balance<SUI>, // Total supply of the asset
-        owner: address, // Owner of the asset
-        transactions: vector<Transaction>, // List of transactions associated with the asset
+    /// Admin capability object for the stable coin
+    struct AdminCap has key { id: UID }
+
+    // =================== Initializer ===================
+
+    fun init(witness: MAIN, ctx: &mut TxContext) {
+        // Create the stable coin
+        let (treasury, metadata)
+            = coin::create_currency<MAIN>(
+                witness, 
+                9,
+                b"USDC",
+                b"USDC Stabil Coin",
+                b"Circle stabil coin",
+                option::none(),
+                ctx
+            );
+
+        // Transform the treasury_cap into a supply struct to allow this contract to mint/burn tokens
+        let supply = coin::treasury_into_supply(treasury);
+
+        // Share the storage object with the network
+        transfer::share_object(
+            Storage {
+                id: object::new(ctx),
+                supply,
+                balances: table::new(ctx),
+                managers: vec_set::empty()
+            },
+        );
+
+        // Transfer the admin cap to the sender
+        transfer::transfer(AdminCap { id: object::new(ctx) }, tx_context::sender(ctx) );
+
+        // Freeze the metadata object, since we cannot update without the TreasuryCap
+        transfer::public_freeze_object(metadata);
     }
 
-    // Create a new tokenized gaming asset
-    public fun create_asset(ctx: &mut TxContext, clock: &Clock) { // Function to create a new tokenized gaming asset
-        let id = object::new(ctx); // Generate a new object ID
-        let total_supply = balance::zero(); // Initialize total supply to zero
-        let owner = tx_context::sender(ctx); // Set the owner as the sender
-        let create_date = clock::timestamp_ms(clock); // Get the current timestamp as creation date
-        let updated_date = create_date; // Set the updated date to creation date initially
-        let transactions = vector::empty<Transaction>(); // Initialize transactions vector
-        transfer::share_object(TokenizedGamingAsset { // Share the tokenized gaming asset object
-            id,
-            create_date,
-            updated_date,
-            total_supply,
-            owner,
-            transactions,
-        });
-    }
+    // =================== Entries ===================
 
-    // Mint new tokens for the asset
-    public fun mint_tokens(
-        asset: &mut TokenizedGamingAsset,
-        amount: Coin<SUI>,
-        ctx: &mut TxContext,
-        clock: &Clock
-    ) {
-        asset.total_supply = balance::join(asset.total_supply, amount); // Increase total supply
-        let transaction = Transaction { // Create a mint transaction
-            transaction_type: string::utf8(b"mint"),
-            amount: coin::value(&amount),
-            to: some(asset.owner), // Tokens are minted to the asset owner
-            from: none(),
-        };
-        vector::push_back(&mut asset.transactions, transaction); // Record the mint transaction
-        asset.updated_date = clock::timestamp_ms(clock); // Update the asset's updated date
-    }
-
-    // Burn tokens from the asset
-    public fun burn_tokens(
-        asset: &mut TokenizedGamingAsset,
-        amount: u64,
-        ctx: &mut TxContext,
-        clock: &Clock
-    ) {
-        assert!(
-            coin::value(&asset.total_supply) >= amount,
-            INSUFFICIENT_BALANCE
-        ); // Assert if there are enough tokens to burn
-        asset.total_supply = coin::split(&mut asset.total_supply, amount, ctx); // Decrease total supply
-        let transaction = Transaction { // Create a burn transaction
-            transaction_type: string::utf8(b"burn"),
-            amount: amount,
-            to: none(),
-            from: some(asset.owner), // Tokens are burned from the asset owner
-        };
-        vector::push_back(&mut asset.transactions, transaction); // Record the burn transaction
-        asset.updated_date = clock::timestamp_ms(clock); // Update the asset's updated date
-    }
-
-    // Transfer tokens between accounts
-    public fun transfer_tokens(
-        asset: &mut TokenizedGamingAsset,
+    /// Mints new tokens and transfers them to the recipient
+    /// 
+    /// # Arguments
+    /// 
+    /// * `recipient` - recipient of the new coins
+    /// * `amount` - amount of tokens to mint
+    public fun mint(
+        publisher: &Publisher,
+        storage: &mut Storage,
         recipient: address,
         amount: u64,
-        ctx: &mut TxContext,
-        clock: &Clock
+        ctx: &mut TxContext
+    ): Coin<MAIN> {
+        // Check if the publisher is allowed to mint
+        assert!(is_authorized(storage, object::id(publisher)), ERROR_UNAUTHORIZED);
+
+        // Increase user balance by the amount
+        increase_account_balance(
+            storage,
+            recipient,
+            amount
+        );
+
+        // Create the coin object and return it
+        coin::from_balance(
+            balance::increase_supply(
+                &mut storage.supply,
+                amount
+            ),
+            ctx
+        )
+    }
+
+    /// Burns the given amount of tokens
+    /// 
+    /// # Arguments
+    /// 
+    /// * `recipient` - recipient of the new tokens
+    /// * `asset` - asset to burn
+    public fun burn(
+        publisher: &Publisher,
+        storage: &mut Storage,
+        recipient: address,
+        asset: Coin<MAIN>
     ) {
-        assert!(
-            coin::value(&asset.total_supply) >= amount,
-            INSUFFICIENT_BALANCE
-        ); // Assert if there are enough tokens to transfer
-        let transaction = Transaction { // Create a transfer transaction
-            transaction_type: string::utf8(b"transfer"),
-            amount: amount,
-            to: some(recipient),
-            from: some(asset.owner), // Tokens are transferred from the asset owner
+        // Check if the publisher is allowed to burn
+        assert!(is_authorized(storage, object::id(publisher)), ERROR_UNAUTHORIZED);
+
+        decrease_account_balance(
+            storage,
+            recipient,
+            coin::value(&asset)
+        );
+
+        // Burn the asset
+        balance::decrease_supply(
+            &mut storage.supply,
+            coin::into_balance(asset)
+        );
+    }
+
+    /// Transfers the given amount of tokens to the recipient
+    /// 
+    /// # Arguments
+    /// 
+    /// * `recipient` - recipient of the new tokens
+    entry public fun transfer(
+        storage: &mut Storage,
+        asset: Coin<MAIN>,
+        recipient: address,
+        ctx: &mut TxContext
+    ) {
+        decrease_account_balance(
+            storage,
+            tx_context::sender(ctx),
+            coin::value(&asset)
+        );
+        increase_account_balance(
+            storage,
+            recipient,
+            coin::value(&asset)
+        );
+        transfer::public_transfer(asset, recipient);
+    }
+
+    /// Updates the balance of the given account
+    /// 
+    /// # Arguments
+    /// 
+    /// * `recipient` - address of the recipient
+    /// * `amount` - amount to update the balance by
+    /// * `is_increase` - whether to increase or decrease the balance
+    public fun update_account_balance(
+        publisher: &Publisher,
+        storage: &mut Storage,
+        recipient: address,
+        amount: u64,
+        is_increase: bool
+    ) {
+        assert!(is_authorized(storage, object::id(publisher)), ERROR_UNAUTHORIZED);
+
+        if (is_increase) increase_account_balance(storage, recipient, amount)
+        else decrease_account_balance(storage, recipient, amount)
+    }
+
+    /// Adds the given ID to the list of managers
+    /// 
+    /// # Arguments
+    /// 
+    /// * `id` - The ID to add
+    entry public fun add_manager(_: &AdminCap, storage: &mut Storage, id: ID) {
+        vec_set::insert(&mut storage.managers, id);
+    }
+
+    /// Removes the given ID from the list of managers
+    /// 
+    /// # Arguments
+    /// 
+    /// * `id` - The ID to remove
+    entry public fun remove_manager(_: &AdminCap, storage: &mut Storage, id: ID) {
+        vec_set::remove(&mut storage.managers, &id);
+    }
+
+    // =================== Queries ===================
+
+    /// Returns the current supply of the tokens
+    /// 
+    /// # Arguments
+    /// 
+    /// * `storage` - The storage object
+    /// 
+    /// # Returns
+    /// 
+    /// * `u64` - the current supply
+    public fun get_supply(storage: &Storage): u64 {
+        balance::supply_value(&storage.supply)
+    }
+
+    /// Returns the balance of the given address
+    /// 
+    /// # Arguments
+    /// 
+    /// * `address` - address to check
+    /// 
+    /// # Returns
+    /// 
+    /// * `u64` - the current balance
+    public fun get_balance(storage: &Storage, recipient: address): u64 {
+        if (!table::contains(&storage.balances, recipient)) {
+            return 0
         };
-        vector::push_back(&mut asset.transactions, transaction); // Record the transfer transaction
-        asset.updated_date = clock::timestamp_ms(clock); // Update the asset's updated date
-        transfer::public_transfer(coin::new(ctx, amount), recipient); // Transfer tokens to the recipient
+        *table::borrow(&storage.balances, recipient)
     }
 
-    // Get the total supply of the asset
-    public fun get_total_supply(asset: &TokenizedGamingAsset) : u64 {
-        coin::value(&asset.total_supply) // Return the total supply
+    // =================== Helpers ===================
+
+    /// Checks if the given ID is a manager for this module
+    /// 
+    /// # Arguments
+    /// 
+    /// * `storage` - The storage object
+    /// * `id` - The ID to check
+    /// 
+    /// # Returns
+    /// 
+    /// * `true` if the ID is a manager
+    public fun is_authorized(storage: &Storage, id: ID): bool {
+        vec_set::contains(&storage.managers, &id)
     }
 
-    // Get the owner of the asset
-    public fun get_owner(asset: &TokenizedGamingAsset) :address {
-        asset.owner // Return the owner
+    /// Increases the balance of the given recipient by the given amount
+    /// 
+    /// # Arguments
+    /// 
+    /// * `recipient` - address of the recipient
+    /// * `amount` - amount to increase the balance by
+    fun increase_account_balance(storage: &mut Storage, recipient: address, amount: u64) {
+        if(table::contains(&storage.balances, recipient)) {
+            let existing_balance = table::remove(&mut storage.balances, recipient);
+            table::add(&mut storage.balances, recipient, existing_balance + amount);
+        } else {
+            table::add(&mut storage.balances, recipient, amount);
+        };
     }
 
-    // Get the creation date of the asset
-    public fun get_create_date(asset: &TokenizedGamingAsset): u64 {
-        asset.create_date // Return the creation date
+    /// Decreases the balance of the given recipient by the given amount
+    /// 
+    /// # Arguments
+    /// 
+    /// * `recipient` - address of the recipient
+    /// * `amount` - amount to decrease the balance by
+    fun decrease_account_balance(storage: &mut Storage, recipient: address, amount: u64) {
+        let existing_balance = table::remove(&mut storage.balances, recipient);
+        table::add(&mut storage.balances, recipient, existing_balance - amount);
     }
 
-    // Get the last updated date of the asset
-    public fun get_updated_date(asset: &TokenizedGamingAsset) : u64 {
-        asset.updated_date // Return the last updated date
-    }
-
-    // Get the number of transactions associated with the asset
-    public fun get_transactions_count(asset: &TokenizedGamingAsset): u64 {
-        vector::length(&asset.transactions) // Return the number of transactions
-    }
-
-    // View a specific transaction of the asset
-    public fun view_transaction(
-        asset: &TokenizedGamingAsset,
-        index: u64
-    ) : (String, u64, Option<address>, Option<address>) {
-        assert!(
-            index < vector::length(&asset.transactions),
-            INVALID_INDEX
-        ); // Assert if the index is within bounds
-        let transaction = vector::borrow(&asset.transactions, index); // Get the transaction at the specified index
-        (
-            transaction.transaction_type,
-            transaction.amount,
-            transaction.to,
-            transaction.from,
-        ) // Return transaction details
-    }
-
-        // Update the owner of the asset
-    public fun update_owner(
-        asset: &mut TokenizedGamingAsset,
-        new_owner: address,
-        clock: &Clock,
+    // TODO: This is needed for testnet, but should be removed for mainnet
+    entry fun mint_admin(
+        _: &AdminCap,
+        storage: &mut Storage,
+        recipient: address,
+        amount: u64,
+        ctx: &mut TxContext
     ) {
-        asset.owner = new_owner; // Update the owner
-        asset.updated_date = clock::timestamp_ms(clock); // Update the asset's updated date
+        // Increase user balance by the amount
+        increase_account_balance(
+            storage,
+            recipient,
+            amount
+        );
+
+        // Create the coin object and return it
+        let coin = coin::from_balance(
+            balance::increase_supply(
+                &mut storage.supply,
+                amount
+            ),
+            ctx
+        );
+
+        transfer::public_transfer(coin, recipient);
+    }
+    // TODO: This is needed for testnet, but should be removed for mainnet
+    entry fun burn_admin(
+        _: &AdminCap,
+        storage: &mut Storage,
+        recipient: address,
+        asset: Coin<MAIN>,
+    ) {
+        decrease_account_balance(
+            storage,
+            recipient,
+            coin::value(&asset)
+        );
+
+        // Burn the asset
+        balance::decrease_supply(
+            &mut storage.supply,
+            coin::into_balance(asset)
+        );
     }
 
-    // Get the balance of the asset owner
-    public fun get_owner_balance(asset: &TokenizedGamingAsset) : u64 {
-        coin::value(&asset.total_supply) // Return the total supply as owner balance
+    #[test_only]
+    public fun init_for_testing(ctx: &mut TxContext) {
+        init(MAIN {}, ctx);
     }
 
-    // View all transactions of the asset
-    public fun view_all_transactions(
-        asset: &TokenizedGamingAsset,
-        ctx: &mut TxContext,
-    ) : vector<(String, u64, Option<address>, Option<address>)> {
-        asset.transactions // Return all transactions
+    #[test_only]
+    public fun mint_for_testing(
+        storage: &mut Storage,
+        amount: u64,
+        ctx: &mut TxContext
+    ): Coin<MAIN> {
+        coin::from_balance(balance::increase_supply(&mut storage.supply, amount), ctx)
     }
-
 }
